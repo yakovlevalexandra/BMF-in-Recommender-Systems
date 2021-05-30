@@ -9,8 +9,8 @@ from timeit import default_timer as timer
 import copy
 
 
-class GreConD_bin_upgr:  #upgraded to compute common values for rows
-    def __init__(self, I):   #I--boolean matrix n*m: list of lists of 1 and 0
+class GreConD_bin:
+    def __init__(self, I):   #I--boolean matrix n*m: list of lists of int
         self.I = I
         self.m = len(I[0])
         self.n = len(I)
@@ -26,7 +26,7 @@ class GreConD_bin_upgr:  #upgraded to compute common values for rows
         self.concepts = None
         self.factors = None
         self.M_int=None
-        self.ones = (1 << self.m) - 1  
+        self.ones = (1 << self.m) - 1
 
     def derive_up(self, N):   #N -- list of indices from the set {0,...,n-1}
         if N!=[]:
@@ -118,36 +118,3 @@ class GreConD_bin_upgr:  #upgraded to compute common values for rows
         B= np.array(A_B[1])
         I = np.where(np.matmul(A,B)>=1, 1, 0)
         return I
-    
-    def com_attr(self):     
-        comb = list(combinations([t for t in range(self.n)], 2))
-        com_attr = {}
-        for i in range(self.n):
-            com_attr[i] = {}
-        for j,k in comb:
-            len_j = bin(self.I_rows[j]).count('1')
-            len_k = bin(self.I_rows[k]).count('1')
-            if len_j !=0 and len_k !=0:
-                len_inters = bin(self.I_rows[j]&self.I_rows[k]).count('1')
-                inters_share = len_inters/max(len_j, len_k)
-                com_attr[j][k] = inters_share
-                com_attr[k][j] = inters_share
-            else:
-                com_attr[j][k] = 0
-                com_attr[k][j] = 0
-        return com_attr
-    
-    def fillgap(self, threshold):         #concept smoothing
-        X_fills = copy.deepcopy(self.I) 
-        com_attr = self.com_attr()
-        for i in range(self.n):
-            for j in range(i+1, self.n):
-                if com_attr[i][j] > threshold:
-                    for k in range(self.m):
-                        for l in range(k+1, self.m):
-                            if self.I[i][k]+self.I[j][k]+self.I[i][l]+self.I[j][l]==3:
-                                X_fills[i][k]=1
-                                X_fills[j][k]=1
-                                X_fills[i][l]=1
-                                X_fills[j][l]=1
-        return X_fills
