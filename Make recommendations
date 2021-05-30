@@ -1,0 +1,300 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import copy
+
+from itertools import combinations
+from scipy.linalg import block_diag
+from timeit import default_timer as timer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error as mae
+
+
+class GreConD_bin_upgr:  #upgraded to compute сoncept smoothing
+    def __init__(self, I):   #I--boolean matrix n*m: list of lists of 1 and 0
+        self.I = I
+        self.m = len(I[0])
+        self.n = len(I)
+        self.I_rows = []    # list of integers from binary rows
+        self.I_cols = []    # list of integers from binary columns
+        for i in self.I:
+            self.I_rows.append(int(''.join(map(str,i)), 2))
+        for j in range(self.m):
+            self.I_cols.append(int(''.join(map(str,[row[j] for row in I])), 2))
+        #self.U = np.argwhere(I==1).tolist()
+        self.U = copy.deepcopy(self.I_rows)
+        self.all_column_indices = list(range(self.m))
+        self.concepts = None
+        self.factors = None
+        self.M_int=None
+        self.ones = (1 << self.m) - 1  
+
+    def derive_up(self, N):   #N -- list of indices from the set {0,...,n-1}
+        if N!=[]:
+            intersect_rows = self.I_rows[N[0]]   
+            for x in N[1:]:
+                intersect_rows &= self.I_rows[x]
+            intersect_rows_bin = bin(intersect_rows)[2:]
+            self.M_int = intersect_rows 
+            len_int_rows = len(intersect_rows_bin)
+            M = [self.m-len_int_rows+i for i in range(len_int_rows) if intersect_rows_bin[i]=='1']
+            return M
+        else:
+            return [i for i in range(self.m)]   
+
+    def derive_down(self, M):   #M -- list of indices from the set {0,...,m-1}
+        if M!=[]:
+            intersect_columns = self.I_cols[M[0]]
+            for y in M[1:]:
+                intersect_columns &= self.I_cols[y]
+            intersect_cols_bin = bin(intersect_columns)[2:]
+            len_int_cols = len(intersect_cols_bin)
+            N = [self.n-len_int_cols+i for i in range(len_int_cols) if intersect_cols_bin[i]=='1']
+            return N
+        else:
+            return [j for j in range(self.n)]
+
+    def add_elem(self, D, y): #direct sum operation from the algorithm
+        D_y = D.copy()
+        D_y.append(y)
+        C = self.derive_down(D_y)
+        D_y = self.derive_up(C)
+        D_int = self.M_int
+        if C==[] or D_y==[]:
+            return [[[],[]], 0, []]
+        else:
+            len_intersection_U = 0
+            for i in C:
+                intersect=self.U[i]&D_int
+                len_intersection_U += bin(intersect).count('1')
+            return [[C, D_y], len_intersection_U, D_int]
+
+    def get_concepts(self):    #returns a set of factor concepts of I
+        F = []
+        while all([v == 0 for v in self.U])!=True:
+            D = []
+            max_len = 0
+            max_len_prev = -1
+            max_concept = []
+            column_indices = self.all_column_indices
+            while column_indices != [] and max_len_prev<max_len:
+                max_len_prev = max_len
+                for y in column_indices:
+                    D_y = self.add_elem(D, y)
+                    len_intersection_U = D_y[1]
+                    if len_intersection_U>max_len:
+                        max_len = len_intersection_U
+                        max_concept = D_y[0]
+                        D_int = D_y[2]
+                D = max_concept[1]
+                column_indices = [i for i in column_indices if i not in D]
+            F.append(max_concept)
+            for i in max_concept[0]:
+                self.U[i] = self.U[i] & (~D_int&self.ones)
+        self.concepts = F
+        return F
+
+    def get_factors(self):    #returns decomposition matrices A and B
+        if self.concepts==None:
+            concepts = self.get_concepts()
+        else:
+            concepts = self.concepts
+        len_c = len(concepts)
+        A = [[0]*len_c for i in range(self.n)]
+        B = [[0]*self.m for i in range(len_c)]
+        for k in range(len_c):
+            for i in concepts[k][0]:
+                A[i][k]=1
+            for j in concepts[k][1]:
+                B[k][j]=1
+        self.factors = [A, B]
+        return [A, B]
+
+    def multiply_factors(self):    #returns a product of decomposition matrices A and B
+        if self.factors==None:
+            A_B = self.get_factors()
+        else:
+            A_B = self.factors
+        A = np.array(A_B[0])
+        B= np.array(A_B[1])
+        I = np.where(np.matmul(A,B)>=1, 1, 0)
+        return I
+    
+    def com_attr(self):     
+        comb = list(combinations([t for t in range(self.n)], 2))
+        com_attr = {}
+        for i in range(self.n):
+            com_attr[i] = {}
+        for j,k in comb:
+            len_j = bin(self.I_rows[j]).count('1')
+            len_k = bin(self.I_rows[k]).count('1')
+            if len_j !=0 and len_k !=0:
+                len_inters = bin(self.I_rows[j]&self.I_rows[k]).count('1')
+                inters_share = len_inters/max(len_j, len_k)
+                com_attr[j][k] = inters_share
+                com_attr[k][j] = inters_share
+            else:
+                com_attr[j][k] = 0
+                com_attr[k][j] = 0
+        return com_attr
+    
+    def fillgap(self, threshold):
+        X_fills = copy.deepcopy(self.I) 
+        com_attr = self.com_attr()
+        for i in range(self.n):
+            for j in range(i+1, self.n):
+                if com_attr[i][j] > threshold:    
+                    for k in range(self.m):
+                        for l in range(k+1, self.m):
+                            if self.I[i][k]+self.I[j][k]+self.I[i][l]+self.I[j][l]==3:
+                                X_fills[i][k]=1
+                                X_fills[j][k]=1
+                                X_fills[i][l]=1
+                                X_fills[j][l]=1
+        return X_fills
+        
+
+def make_recommendations(train, test, n_neighbors=20, smooth=False, threshold=0.5):
+    train_bin = train.replace({1: 0, 2: 0, 3: 0, 4: 1, 5: 1}).astype('int8')
+
+    # find user-factor matrix
+    if smooth==False:
+        start=timer()
+        class_matr = GreConD_bin_upgr(train_bin.to_numpy(dtype='int8').tolist())
+        factors = class_matr.get_factors()[0]
+        user_factor = pd.DataFrame(factors, index=np.arange(1, len(train)+1))
+        print('Время на факторизацию:', round(timer()-start, 4))
+        print('Количество факторов:', len(factors[0]))
+    else:
+        class_matr_0 = GreConD_bin_upgr(train_bin.to_numpy(dtype='int8').tolist())
+        print('Порог сглаживания:', threshold)
+        start = timer()
+        X_filled = class_matr_0.fillgap(threshold)
+        print('Время на сглаживание:', round(timer()-start, 4))
+        start = timer()
+        class_matr = GreConD_bin_upgr(X_filled)
+        factors = class_matr.get_factors()[0]
+        user_factor = pd.DataFrame(factors, index=np.arange(1, len(train)+1))
+        print('Время на факторизацию:', round(timer()-start, 4))
+        print('Количество факторов:', len(factors[0]))
+
+    # find n_neigbors nearest neighbors and distances to them
+    distances = {}
+    k_nearest = {}
+    for i in test.index:
+        distances[i] = {}
+        for j in train.index:
+            denominator = np.sum(user_factor.loc[i]|user_factor.loc[j])
+            if denominator==0:
+                distances[i][j]=0
+            else:
+                distances[i][j] = (np.sum(user_factor.loc[i]&user_factor.loc[j]))/(np.sum(user_factor.loc[i]|user_factor.loc[j]))
+        k_nearest[i] = list(zip(*sorted(distances[i].items(), key=lambda kv: -kv[1])[:n_neighbors]))
+
+    # make predictions
+    predicted = test.copy().astype('float')
+    for u in test.index:
+        hidden_items = test.loc[u][test.loc[u]>0].index
+        r_u_mean = np.mean(train.loc[u][train.loc[u]>0])
+        neigh_df = train.loc[list(k_nearest[u][0])]
+        r_neigh_means = (neigh_df[neigh_df>0]).mean(axis=1).fillna(0)
+        distances = list(k_nearest[u][1])
+        for i in hidden_items:
+            ratings_i = neigh_df[i]
+            cur_dist = distances*ratings_i.where(ratings_i==0, 1)
+            denom = np.sum(cur_dist)
+            if denom!=0:
+                predicted[i][u] = r_u_mean + np.sum(np.dot(cur_dist, (ratings_i-r_neigh_means)))/denom
+            else:
+                predicted[i][u] = r_u_mean
+    return predicted
+    
+    
+ def calc_mae(test, predicted):
+    all_hidden = 0
+    sum_errors = 0
+    for u in predicted.index:
+        hidden_items = test.loc[u][test.loc[u]>0].index
+        all_hidden+=len(hidden_items)
+        sum_errors+=np.sum(np.abs(test.loc[u].loc[hidden_items]-predicted.loc[u].loc[hidden_items]))
+    mae = sum_errors/all_hidden
+    return mae
+    
+    
+ def precision_recall(test, predicted):
+    pred_0 = predicted.where(predicted>3, 0)
+    pred_bin = pred_0.where(pred_0<=3, 1).astype('int8')
+    test_bin =  test.replace({1: 0, 2: 0, 3: 0, 4: 1, 5: 1}).astype('int8')
+    tp=0
+    fp=0
+    fn=0
+    for u in predicted.index:
+        hidden_items = test.loc[u][test.loc[u]>0].index
+        tp+=np.sum(test_bin.loc[u].loc[hidden_items]&pred_bin.loc[u].loc[hidden_items])
+        fp+=np.sum((1-test_bin.loc[u].loc[hidden_items])&pred_bin.loc[u].loc[hidden_items])
+        fn+=np.sum(test_bin.loc[u].loc[hidden_items]&(1-pred_bin.loc[u].loc[hidden_items]))
+
+    if tp+fp==0:
+        precision=0
+    else:
+        precision = tp/(tp+fp)
+
+    if tp+fn==0:
+        recall=0
+    else:
+        recall = tp/(tp+fn)
+    return (precision, recall)
+    
+    
+ def recommend_check(train_list, test_list,
+                    n_neighbors=20, smooth=False, threshold_min=2, threshold_max=10):
+    n_val = len(train_list)
+
+    if smooth==False:
+        print('Рекомендации без сглаживания понятий:')
+        mae, precision, recall = 0, 0, 0
+        for w in range(n_val):
+            print(w+1, 'test set')
+            train = train_list[w]
+            test = test_list[w]
+            predicted = make_recommendations(train, test, n_neighbors)
+            mae_cur= calc_mae(test, predicted)
+            mae+=mae_cur
+            p, r = precision_recall(test, predicted)
+            precision+=p
+            recall+=r
+            print('MAE', mae_cur)
+            print('precision',p)
+            print('recall', r)
+            print('----------------------')
+        print('MAE:', mae/n_val)
+        print('precision:', precision/n_val)
+        print('recall:', recall/n_val)
+    else:
+        print('Рекомендации со сглаживанием понятий:')
+        mae_dict = {}
+        precision_dict = {}
+        recall_dict = {}
+        for k in range(threshold_min, threshold_max):
+            mae_dict[k/10] = 0
+            precision_dict[k/10] = 0
+            recall_dict[k/10] = 0
+        for q in range(threshold_min, threshold_max):
+            for w in range(n_val):
+                print(w+1, 'test set')
+                train = train_list[w]
+                test = test_list[w]
+                predicted = make_recommendations(train, test, n_neighbors, smooth, threshold=q/10) 
+                mae = calc_mae(test, predicted)
+                p, r = precision_recall(test, predicted)
+                mae_dict[q/10] += mae/n_val
+                precision_dict[q/10]+=p/n_val
+                recall_dict[q/10]+=r/n_val
+                print('MAE', mae)
+                print('precision',p)
+                print('recall', r)
+                print('----------------------')
+            print('=====================')
+        print('MAE для порогов сглаживания:', mae_dict)
+        print('precision для порогов сглаживания:', precision_dict)
+        print('recall для порогов сглаживания:', recall_dict)
